@@ -1,0 +1,6 @@
+streamlit>=1.35.0
+pandas>=2.0.0
+numpy>=1.26.0
+plotly>=5.20.0
+# MetaTrader5 è solo per Windows — commenta se usi Linux/Mac
+# MetaTrader5>=5.0.45
