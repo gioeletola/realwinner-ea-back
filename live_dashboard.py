@@ -16,6 +16,102 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ALERT SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALERT_SOUND_LONG = """
+<audio autoplay>
+  <source src="data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAA..." type="audio/wav">
+</audio>
+"""
+
+def init_alert_state():
+    if "alert_history" not in st.session_state:
+        st.session_state.alert_history = []
+    if "last_signal" not in st.session_state:
+        st.session_state.last_signal = 0
+    if "last_dd_alert" not in st.session_state:
+        st.session_state.last_dd_alert = 0.0
+    if "alerts_enabled" not in st.session_state:
+        st.session_state.alerts_enabled = True
+
+
+def push_alert(level: str, title: str, message: str):
+    """Aggiunge un alert allo storico e mostra toast."""
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    st.session_state.alert_history.insert(0, {
+        "time": now,
+        "level": level,
+        "title": title,
+        "message": message,
+    })
+    # Mantieni max 50 alert
+    st.session_state.alert_history = st.session_state.alert_history[:50]
+    # Toast Streamlit
+    if level == "success":
+        st.toast(f"🟢 {title}: {message}", icon="📈")
+    elif level == "error":
+        st.toast(f"🔴 {title}: {message}", icon="⚠️")
+    elif level == "warning":
+        st.toast(f"🟡 {title}: {message}", icon="🔔")
+    else:
+        st.toast(f"ℹ️ {title}: {message}")
+
+
+def check_signal_alert(sig: dict):
+    """Lancia alert se il segnale cambia da FLAT a LONG/SHORT."""
+    if not st.session_state.alerts_enabled:
+        return
+    prev = st.session_state.last_signal
+    curr = sig["signal"]
+    if curr != prev:
+        if curr == 1:
+            push_alert("success", "SEGNALE LONG", f"SMC:{sig['smc']} Trend:{sig['trend']} MR:{sig['mr']} — Confluenza {sig['bull']}▲")
+        elif curr == -1:
+            push_alert("error", "SEGNALE SHORT", f"SMC:{sig['smc']} Trend:{sig['trend']} MR:{sig['mr']} — Confluenza {sig['bear']}▼")
+        elif curr == 0 and prev != 0:
+            push_alert("info", "Segnale chiuso", "Tornato in FLAT")
+    st.session_state.last_signal = curr
+
+
+def check_dd_alert(dd_pct: float, max_daily_loss: float, daily_warning: float):
+    """Alert se drawdown supera soglie."""
+    if not st.session_state.alerts_enabled:
+        return
+    prev = st.session_state.last_dd_alert
+    if dd_pct >= max_daily_loss and prev < max_daily_loss:
+        push_alert("error", "MAX DAILY LOSS RAGGIUNTO", f"DD {dd_pct:.2f}% ≥ {max_daily_loss}% — EA bloccato!")
+    elif dd_pct >= daily_warning and prev < daily_warning:
+        push_alert("warning", "Daily Warning", f"DD {dd_pct:.2f}% ≥ {daily_warning}% — lot size dimezzato")
+    st.session_state.last_dd_alert = dd_pct
+
+
+def render_alert_panel():
+    """Pannello storico alert nella sidebar."""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔔 Alert")
+    st.session_state.alerts_enabled = st.sidebar.toggle(
+        "Alert attivi", value=st.session_state.get("alerts_enabled", True)
+    )
+
+    history = st.session_state.get("alert_history", [])
+    if not history:
+        st.sidebar.caption("Nessun alert ancora.")
+        return
+
+    if st.sidebar.button("🗑️ Cancella storico"):
+        st.session_state.alert_history = []
+        st.rerun()
+
+    for a in history[:10]:
+        icon = {"success": "🟢", "error": "🔴", "warning": "🟡"}.get(a["level"], "ℹ️")
+        st.sidebar.markdown(
+            f"{icon} **{a['time']}** — {a['title']}  \n"
+            f"<small>{a['message']}</small>",
+            unsafe_allow_html=True,
+        )
+
 # MetaTrader5 è disponibile solo su Windows; su Linux/Mac si usa la modalità demo
 try:
     import MetaTrader5 as mt5
@@ -491,7 +587,9 @@ def signal_badge(val: int) -> str:
 def main():
     st.title("📈 RealWinner EA v5 — Live Monitor")
 
+    init_alert_state()
     conn, p = sidebar()
+    render_alert_panel()
     symbol = conn["symbol"]
     demo_mode = conn["mode"] == "Demo (dati sintetici)"
 
@@ -537,6 +635,9 @@ def main():
     # ── Calcola segnali
     sig = get_confluence_signal(df_m15, df_h4, p)
 
+    # ── Controlla alert
+    check_signal_alert(sig)
+
     # ─────────────────────────────────────────────────────────────
     # ROW 1 — Account info
     # ─────────────────────────────────────────────────────────────
@@ -548,6 +649,8 @@ def main():
     profit  = acct.get("profit",  0)
     dd_pct  = (balance - equity) / balance * 100 if balance > 0 else 0
     currency = acct.get("currency", "USD")
+
+    check_dd_alert(dd_pct, p["max_daily_loss"], p["daily_warning"])
 
     c1.metric("Balance",  f"{balance:,.2f} {currency}")
     c2.metric("Equity",   f"{equity:,.2f} {currency}")
@@ -587,6 +690,17 @@ def main():
         st.markdown(f"**Confluenza ({bull_n}▲ {bear_n}▼ / min {conf_min})**")
         st.markdown(f'<span class="{color_class}" style="font-size:1.3em">{label}</span>',
                     unsafe_allow_html=True)
+
+    # ── Banner alert attivo
+    if sig["signal"] == 1:
+        st.success("▲ **SEGNALE LONG ATTIVO** — Confluenza raggiunta")
+    elif sig["signal"] == -1:
+        st.error("▼ **SEGNALE SHORT ATTIVO** — Confluenza raggiunta")
+
+    if dd_pct >= p["max_daily_loss"]:
+        st.error(f"🛑 **MAX DAILY LOSS RAGGIUNTO** — DD {dd_pct:.2f}% — EA bloccato")
+    elif dd_pct >= p["daily_warning"]:
+        st.warning(f"⚠️ **Daily Warning** — DD {dd_pct:.2f}% — Lot size ridotto")
 
     st.markdown("---")
 
@@ -635,6 +749,33 @@ def main():
     i4.metric("RSI",                  f"{last.get('rsi', 0):.1f}")
     i5.metric("ATR",                  f"{last.get('atr', 0):.5f}")
     i6.metric("BB Width",             f"{last.get('bb_upper',0) - last.get('bb_lower',0):.5f}")
+
+    # ─────────────────────────────────────────────────────────────
+    # ROW 5 — Storico alert
+    # ─────────────────────────────────────────────────────────────
+    history = st.session_state.get("alert_history", [])
+    if history:
+        with st.expander(f"🔔 Storico Alert ({len(history)})", expanded=False):
+            level_colors = {"success": "#22c55e", "error": "#ef4444", "warning": "#f59e0b"}
+            rows_html = ""
+            for a in history:
+                color = level_colors.get(a["level"], "#94a3b8")
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="color:#94a3b8;white-space:nowrap">{a["time"]}</td>'
+                    f'<td style="color:{color};font-weight:700">{a["title"]}</td>'
+                    f'<td style="color:#e2e8f0">{a["message"]}</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<table style="width:100%;border-collapse:collapse;font-size:0.85em">'
+                f'<thead><tr>'
+                f'<th style="text-align:left;color:#94a3b8;padding:4px 8px">Ora</th>'
+                f'<th style="text-align:left;color:#94a3b8;padding:4px 8px">Tipo</th>'
+                f'<th style="text-align:left;color:#94a3b8;padding:4px 8px">Dettaglio</th>'
+                f'</tr></thead><tbody>{rows_html}</tbody></table>',
+                unsafe_allow_html=True,
+            )
 
     # ─────────────────────────────────────────────────────────────
     # Footer + auto-refresh
